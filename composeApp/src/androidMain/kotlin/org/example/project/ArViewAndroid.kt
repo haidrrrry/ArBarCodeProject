@@ -1,5 +1,11 @@
 package org.example.project
 
+import android.annotation.SuppressLint
+import android.content.Context
+import android.util.Log
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -16,8 +22,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -26,16 +30,204 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.delay
-import kotlin.math.cos
-import kotlin.math.sin
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 @Composable
-fun IOSARBarcodeScreen(
+actual fun ARCameraView(
+    isScanning: Boolean,
+    onBarcodeDetected: (BarcodeData) -> Unit,
+    modifier: Modifier
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var camera by remember { mutableStateOf<Camera?>(null) }
+
+    // Create PreviewView once and reuse it
+    val previewView = remember { PreviewView(context) }
+
+    LaunchedEffect(isScanning) {
+        if (isScanning) {
+            setupCamera(context, lifecycleOwner, previewView, onBarcodeDetected, cameraExecutor) { provider, cam ->
+                cameraProvider = provider
+                camera = cam
+            }
+        } else {
+            // Properly cleanup when not scanning
+            try {
+                cameraProvider?.unbindAll()
+                delay(100) // Give time for cleanup
+            } catch (e: Exception) {
+                Log.w("ARCamera", "Error during camera cleanup", e)
+            }
+        }
+    }
+
+    AndroidView(
+        factory = { previewView },
+        modifier = modifier.fillMaxSize()
+    )
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                cameraProvider?.unbindAll()
+                cameraExecutor.shutdown()
+            } catch (e: Exception) {
+                Log.w("ARCamera", "Error during dispose", e)
+            }
+        }
+    }
+}
+
+@SuppressLint("UnsafeOptInUsageError")
+private fun setupCamera(
+    context: Context,
+    lifecycleOwner: LifecycleOwner,
+    previewView: PreviewView,
+    onBarcodeDetected: (BarcodeData) -> Unit,
+    cameraExecutor: ExecutorService,
+    onCameraReady: (ProcessCameraProvider, Camera) -> Unit
+) {
+    val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+
+    cameraProviderFuture.addListener({
+        try {
+            val cameraProvider = cameraProviderFuture.get()
+
+            // Unbind all use cases before rebinding
+            cameraProvider.unbindAll()
+
+            // Build preview use case
+            val preview = Preview.Builder()
+                .setTargetResolution(android.util.Size(1920, 1080))
+                .build()
+                .also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+
+            // Build image analysis use case
+            val imageAnalyzer = ImageAnalysis.Builder()
+                .setTargetResolution(android.util.Size(1920, 1080))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                .build()
+                .also { analyzer ->
+                    analyzer.setAnalyzer(cameraExecutor) { imageProxy ->
+                        processImageProxy(imageProxy, onBarcodeDetected)
+                    }
+                }
+
+            // Select back camera
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+            // Bind use cases to lifecycle
+            val camera = cameraProvider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                imageAnalyzer
+            )
+
+            onCameraReady(cameraProvider, camera)
+            Log.d("ARCamera", "Camera setup successful")
+
+        } catch (exc: Exception) {
+            Log.e("ARCamera", "Use case binding failed", exc)
+        }
+    }, ContextCompat.getMainExecutor(context))
+}
+
+@androidx.camera.core.ExperimentalGetImage
+private fun processImageProxy(
+    imageProxy: ImageProxy,
+    onBarcodeDetected: (BarcodeData) -> Unit
+) {
+    try {
+        val mediaImage = imageProxy.image
+        if (mediaImage != null) {
+            val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+            val scanner = BarcodeScanning.getClient()
+
+            scanner.process(image)
+                .addOnSuccessListener { barcodes ->
+                    try {
+                        barcodes.forEach { barcode ->
+                            barcode.rawValue?.let { value ->
+                                val boundingBox = barcode.boundingBox
+                                onBarcodeDetected(
+                                    BarcodeData(
+                                        value = value,
+                                        format = getBarcodeFormat(barcode.format),
+                                        x = boundingBox?.centerX()?.toFloat() ?: 0f,
+                                        y = boundingBox?.centerY()?.toFloat() ?: 0f,
+                                        z = 0f
+                                    )
+                                )
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("BarcodeScanning", "Error processing barcodes", e)
+                    }
+                }
+                .addOnFailureListener { exception ->
+                    Log.e("BarcodeScanning", "Barcode scanning failed", exception)
+                }
+                .addOnCompleteListener {
+                    try {
+                        imageProxy.close()
+                    } catch (e: Exception) {
+                        Log.w("BarcodeScanning", "Error closing image proxy", e)
+                    }
+                }
+        } else {
+            imageProxy.close()
+        }
+    } catch (e: Exception) {
+        Log.e("BarcodeScanning", "Error in processImageProxy", e)
+        try {
+            imageProxy.close()
+        } catch (closeException: Exception) {
+            Log.w("BarcodeScanning", "Error closing image proxy in catch block", closeException)
+        }
+    }
+}
+
+private fun getBarcodeFormat(format: Int): String {
+    return when (format) {
+        Barcode.FORMAT_QR_CODE -> "QR Code"
+        Barcode.FORMAT_CODE_128 -> "Code 128"
+        Barcode.FORMAT_CODE_39 -> "Code 39"
+        Barcode.FORMAT_EAN_13 -> "EAN-13"
+        Barcode.FORMAT_EAN_8 -> "EAN-8"
+        Barcode.FORMAT_UPC_A -> "UPC-A"
+        Barcode.FORMAT_UPC_E -> "UPC-E"
+        Barcode.FORMAT_CODE_93 -> "Code 93"
+        Barcode.FORMAT_CODABAR -> "Codabar"
+        Barcode.FORMAT_DATA_MATRIX -> "Data Matrix"
+        Barcode.FORMAT_PDF417 -> "PDF417"
+        Barcode.FORMAT_AZTEC -> "Aztec"
+        else -> "Unknown"
+    }
+}
+
+@Composable
+fun AndroidARBarcodeScreen(
     viewModel: ARBarcodeViewModel = remember { ARBarcodeViewModel() }
 ) {
     var showingSettings by remember { mutableStateOf(false) }
@@ -47,11 +239,11 @@ fun IOSARBarcodeScreen(
 
     // Debug state changes
     LaunchedEffect(viewModel.isScanning) {
-        println("IOSARBarcodeScreen: ViewModel isScanning changed to: ${viewModel.isScanning}")
+        println("AndroidARBarcodeScreen: ViewModel isScanning changed to: ${viewModel.isScanning}")
     }
 
     LaunchedEffect(scannedBarcodes.size) {
-        println("IOSARBarcodeScreen: Scanned barcodes count: ${scannedBarcodes.size}")
+        println("AndroidARBarcodeScreen: Scanned barcodes count: ${scannedBarcodes.size}")
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -59,7 +251,7 @@ fun IOSARBarcodeScreen(
         ARCameraView(
             isScanning = viewModel.isScanning,
             onBarcodeDetected = { barcode ->
-                println("IOSARBarcodeScreen: Barcode detected in UI: ${barcode.value}")
+                println("AndroidARBarcodeScreen: Barcode detected in UI: ${barcode.value}")
                 lastDetectedBarcode = barcode
                 showSuccessAnimation = true
                 viewModel.onBarcodeDetected(barcode)
@@ -68,44 +260,44 @@ fun IOSARBarcodeScreen(
         )
 
         // AR Scanner Overlay - The main attraction!
-        ARScannerOverlay(
+        AndroidARScannerOverlay(
             isScanning = viewModel.isScanning,
             showSuccess = showSuccessAnimation,
             onSuccessAnimationComplete = { showSuccessAnimation = false },
             modifier = Modifier.fillMaxSize()
         )
 
-        // iOS-style UI overlay
-        IOSAROverlayUI(
+        // Android-style UI overlay
+        AndroidAROverlayUI(
             isScanning = viewModel.isScanning,
             barcodeCount = scannedBarcodes.size,
             lastDetectedBarcode = lastDetectedBarcode,
             onToggleScanning = {
                 if (viewModel.isScanning) {
-                    println("IOSARBarcodeScreen: Stop scanning button pressed")
+                    println("AndroidARBarcodeScreen: Stop scanning button pressed")
                     viewModel.stopScanning()
                 } else {
-                    println("IOSARBarcodeScreen: Start scanning button pressed")
+                    println("AndroidARBarcodeScreen: Start scanning button pressed")
                     viewModel.startScanning()
                 }
-                println("IOSARBarcodeScreen: Scanning state after toggle: ${viewModel.isScanning}")
+                println("AndroidARBarcodeScreen: Scanning state after toggle: ${viewModel.isScanning}")
             },
             onShowSettings = {
                 showingSettings = true
-                println("IOSARBarcodeScreen: Show settings pressed")
+                println("AndroidARBarcodeScreen: Show settings pressed")
             },
             modifier = Modifier.fillMaxSize()
         )
 
         // Settings sheet
         if (showingSettings) {
-            IOSSettingsSheet(
+            AndroidSettingsSheet(
                 onDismiss = {
                     showingSettings = false
-                    println("IOSARBarcodeScreen: Settings dismissed")
+                    println("AndroidARBarcodeScreen: Settings dismissed")
                 },
                 onClearHistory = {
-                    println("IOSARBarcodeScreen: Clear history pressed")
+                    println("AndroidARBarcodeScreen: Clear history pressed")
                     viewModel.clearHistory()
                 },
                 barcodeCount = scannedBarcodes.size
@@ -115,7 +307,7 @@ fun IOSARBarcodeScreen(
 }
 
 @Composable
-fun ARScannerOverlay(
+fun AndroidARScannerOverlay(
     isScanning: Boolean,
     showSuccess: Boolean,
     onSuccessAnimationComplete: () -> Unit,
@@ -194,39 +386,37 @@ fun ARScannerOverlay(
             ) {
                 val center = Offset(size.width / 2, size.height / 2)
                 val frameSize = minOf(size.width, size.height) * 0.7f
-                val size = Size(frameSize, frameSize * 0.8f)
+                val frameRect = Size(frameSize, frameSize * 0.8f)
                 val topLeft = Offset(
-                    x = center.x - size.width / 2,
-                    y = center.y - size.height / 2
+                    x = center.x - frameRect.width / 2,
+                    y = center.y - frameRect.height / 2
                 )
-                val frameRect = Rect(topLeft, size)
-
-
+                val scanRect = Rect(topLeft, frameRect)
 
                 // AR Grid background
-                drawARGrid(frameRect, Color.Cyan.copy(alpha = 0.2f))
+                drawAndroidARGrid(scanRect, Color.Cyan.copy(alpha = 0.2f))
 
                 // Radar sweep
-                drawRadarSweep(center, frameSize * 0.4f, radarRotation, Color.Cyan.copy(alpha = 0.3f))
+                drawAndroidRadarSweep(center, frameSize * 0.4f, radarRotation, Color.Cyan.copy(alpha = 0.3f))
 
                 // Pulsing circles
-                drawPulsingCircles(center, frameSize * 0.3f, pulseScale, Color.Cyan.copy(alpha = 0.4f))
+                drawAndroidPulsingCircles(center, frameSize * 0.3f, pulseScale, Color.Cyan.copy(alpha = 0.4f))
 
                 // Main scanning frame with glowing corners
-                drawScanningFrame(frameRect, cornerGlow)
+                drawAndroidScanningFrame(scanRect, cornerGlow)
 
                 // Moving scan line
-                drawScanLine(frameRect, scanLineY)
+                drawAndroidScanLine(scanRect, scanLineY)
 
                 // Corner brackets
-                drawCornerBrackets(frameRect, cornerGlow)
+                drawAndroidCornerBrackets(scanRect, cornerGlow)
 
                 // Crosshair in center
-                drawCrosshair(center, Color.Cyan.copy(alpha = 0.8f))
+                drawAndroidCrosshair(center, Color.Cyan.copy(alpha = 0.8f))
             }
 
             // AR HUD Elements
-            ARHUDElements(
+            AndroidARHUDElements(
                 modifier = Modifier.fillMaxSize(),
                 scanProgress = scanLineY
             )
@@ -279,8 +469,8 @@ fun ARScannerOverlay(
     }
 }
 
-// Custom drawing functions for AR effects
-fun DrawScope.drawARGrid(rect: androidx.compose.ui.geometry.Rect, color: Color) {
+// Custom drawing functions for Android AR effects
+fun DrawScope.drawAndroidARGrid(rect: androidx.compose.ui.geometry.Rect, color: Color) {
     val gridSpacing = 30f
     val strokeWidth = 1f
 
@@ -309,7 +499,7 @@ fun DrawScope.drawARGrid(rect: androidx.compose.ui.geometry.Rect, color: Color) 
     }
 }
 
-fun DrawScope.drawRadarSweep(center: Offset, radius: Float, rotation: Float, color: Color) {
+fun DrawScope.drawAndroidRadarSweep(center: Offset, radius: Float, rotation: Float, color: Color) {
     val sweepGradient = Brush.sweepGradient(
         colors = listOf(
             Color.Transparent,
@@ -331,7 +521,7 @@ fun DrawScope.drawRadarSweep(center: Offset, radius: Float, rotation: Float, col
     }
 }
 
-fun DrawScope.drawPulsingCircles(center: Offset, baseRadius: Float, scale: Float, color: Color) {
+fun DrawScope.drawAndroidPulsingCircles(center: Offset, baseRadius: Float, scale: Float, color: Color) {
     for (i in 1..3) {
         val radius = baseRadius * i * 0.3f * scale
         val alpha = (1f - (i * 0.2f)) * 0.5f
@@ -344,7 +534,7 @@ fun DrawScope.drawPulsingCircles(center: Offset, baseRadius: Float, scale: Float
     }
 }
 
-fun DrawScope.drawScanningFrame(rect: androidx.compose.ui.geometry.Rect, glowIntensity: Float) {
+fun DrawScope.drawAndroidScanningFrame(rect: androidx.compose.ui.geometry.Rect, glowIntensity: Float) {
     val glowColor = Color.Cyan.copy(alpha = 0.6f * glowIntensity)
     val strokeWidth = 3.dp.toPx()
 
@@ -367,7 +557,7 @@ fun DrawScope.drawScanningFrame(rect: androidx.compose.ui.geometry.Rect, glowInt
     )
 }
 
-fun DrawScope.drawScanLine(rect: androidx.compose.ui.geometry.Rect, progress: Float) {
+fun DrawScope.drawAndroidScanLine(rect: androidx.compose.ui.geometry.Rect, progress: Float) {
     val y = rect.top + (rect.height * progress)
     val gradient = Brush.horizontalGradient(
         colors = listOf(
@@ -396,7 +586,7 @@ fun DrawScope.drawScanLine(rect: androidx.compose.ui.geometry.Rect, progress: Fl
     )
 }
 
-fun DrawScope.drawCornerBrackets(rect: androidx.compose.ui.geometry.Rect, glowIntensity: Float) {
+fun DrawScope.drawAndroidCornerBrackets(rect: androidx.compose.ui.geometry.Rect, glowIntensity: Float) {
     val bracketLength = 30.dp.toPx()
     val strokeWidth = 4.dp.toPx()
     val color = Color.Cyan.copy(alpha = 0.8f * glowIntensity)
@@ -459,7 +649,7 @@ fun DrawScope.drawCornerBrackets(rect: androidx.compose.ui.geometry.Rect, glowIn
     )
 }
 
-fun DrawScope.drawCrosshair(center: Offset, color: Color) {
+fun DrawScope.drawAndroidCrosshair(center: Offset, color: Color) {
     val size = 20.dp.toPx()
     val strokeWidth = 2.dp.toPx()
 
@@ -488,7 +678,7 @@ fun DrawScope.drawCrosshair(center: Offset, color: Color) {
 }
 
 @Composable
-fun ARHUDElements(
+fun AndroidARHUDElements(
     modifier: Modifier = Modifier,
     scanProgress: Float
 ) {
@@ -574,8 +764,9 @@ fun ARHUDElements(
     }
 }
 
+
 @Composable
-fun IOSAROverlayUI(
+fun AndroidAROverlayUI(
     isScanning: Boolean,
     barcodeCount: Int,
     lastDetectedBarcode: BarcodeData?,
@@ -633,16 +824,17 @@ fun IOSAROverlayUI(
             }
         }
 
-        // Bottom control panel with futuristic design
+        // Bottom control panel with Material Design 3 styling
         Card(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(16.dp),
             colors = CardDefaults.cardColors(
-                containerColor = Color.Black.copy(alpha = 0.9f)
+                containerColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.95f)
             ),
-            shape = RoundedCornerShape(24.dp)
+            shape = RoundedCornerShape(28.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -652,98 +844,80 @@ fun IOSAROverlayUI(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Settings button
-                Card(
+                FilledIconButton(
                     onClick = onShowSettings,
-                    modifier = Modifier.size(52.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color.Gray.copy(alpha = 0.3f)
-                    ),
-                    shape = CircleShape
+                    modifier = Modifier.size(56.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
                 ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.size(24.dp)
+                    )
                 }
 
                 // Main scan button with AR styling
-                Card(
+                FilledIconButton(
                     onClick = {
-                        println("IOSAROverlayUI: AR Scan button clicked, current state: $isScanning")
+                        println("AndroidAROverlayUI: AR Scan button clicked, current state: $isScanning")
                         onToggleScanning()
                     },
                     modifier = Modifier
                         .size(72.dp)
                         .border(
-                            2.dp,
+                            3.dp,
                             if (isScanning) Color.Red.copy(alpha = 0.8f) else Color.Cyan.copy(alpha = 0.8f),
                             CircleShape
                         ),
-                    colors = CardDefaults.cardColors(
+                    colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = if (isScanning)
                             Color.Red.copy(alpha = 0.2f) else
                             Color.Cyan.copy(alpha = 0.2f)
-                    ),
-                    shape = CircleShape
+                    )
                 ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (isScanning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                            contentDescription = if (isScanning) "Stop AR Scan" else "Start AR Scan",
-                            tint = if (isScanning) Color.Red else Color.Cyan,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = if (isScanning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                        contentDescription = if (isScanning) "Stop AR Scan" else "Start AR Scan",
+                        tint = if (isScanning) Color.Red else Color.Cyan,
+                        modifier = Modifier.size(36.dp)
+                    )
                 }
 
                 // History button with badge
-                Card(
-                    onClick = {
-                        println("IOSAROverlayUI: History button pressed")
-                    },
-                    modifier = Modifier.size(52.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color.Gray.copy(alpha = 0.3f)
-                    ),
-                    shape = CircleShape
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        BadgedBox(
-                            badge = {
-                                if (barcodeCount > 0) {
-                                    Badge(
-                                        containerColor = Color.Cyan,
-                                        contentColor = Color.Black
-                                    ) {
-                                        Text(
-                                            barcodeCount.toString(),
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
+                BadgedBox(
+                    badge = {
+                        if (barcodeCount > 0) {
+                            Badge(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ) {
+                                Text(
+                                    barcodeCount.toString(),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
-                        ) {
-                            Icon(
-                                Icons.Default.History,
-                                contentDescription = "History",
-                                tint = Color.White,
-                                modifier = Modifier.size(24.dp)
-                            )
                         }
+                    }
+                ) {
+                    FilledIconButton(
+                        onClick = {
+                            println("AndroidAROverlayUI: History button pressed")
+                        },
+                        modifier = Modifier.size(56.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.History,
+                            contentDescription = "History",
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(24.dp)
+                        )
                     }
                 }
             }
@@ -752,87 +926,118 @@ fun IOSAROverlayUI(
 }
 
 @Composable
-fun IOSSettingsSheet(
+fun AndroidSettingsSheet(
     onDismiss: () -> Unit,
     onClearHistory: () -> Unit,
     barcodeCount: Int
 ) {
-    Card(
+    // Background overlay
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        shape = RoundedCornerShape(20.dp)
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.5f))
     ) {
-        Column(
-            modifier = Modifier.padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+        Card(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 16.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
-                Icon(
-                    Icons.Default.Settings,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
+                // Handle bar
+                Box(
+                    modifier = Modifier
+                        .width(32.dp)
+                        .height(4.dp)
+                        .background(
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                            RoundedCornerShape(2.dp)
+                        )
+                        .align(Alignment.CenterHorizontally)
                 )
-                Text(
-                    text = "AR Scanner Settings",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
-                )
-            }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-
-            // Clear history option
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "Clear Scan History",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "$barcodeCount barcodes detected",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                Button(
-                    onClick = {
-                        onClearHistory()
-                        onDismiss()
-                        println("IOSSettingsSheet: Clear history executed")
-                    },
-                    enabled = barcodeCount > 0,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("Clear All")
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "AR Scanner Settings",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
-            }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
 
-            // Done button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                FilledTonalButton(onClick = onDismiss) {
-                    Text("Done")
+                // Clear history option
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Clear Scan History",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "$barcodeCount barcodes detected",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            onClearHistory()
+                            onDismiss()
+                            println("AndroidSettingsSheet: Clear history executed")
+                        },
+                        enabled = barcodeCount > 0,
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    ) {
+                        Text("Clear All")
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+                // Done button
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text("Done")
+                    }
+
                 }
             }
         }
     }
 }
+

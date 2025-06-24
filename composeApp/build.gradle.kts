@@ -44,6 +44,7 @@ kotlin {
             implementation("androidx.camera:camera-lifecycle:1.3.0")
             implementation("androidx.camera:camera-view:1.3.0")
             implementation("androidx.compose.ui:ui-viewbinding:1.5.4")
+            implementation("androidx.compose.material3:material3:1.2.0")
 
         }
         iosMain.dependencies {
