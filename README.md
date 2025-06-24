@@ -3,8 +3,12 @@
 
 **ArBarCodeProject** is a cutting-edge mobile application built with Kotlin Multiplatform Mobile (KMM) and Compose Multiplatform, designed to integrate Augmented Reality (AR) and Barcode scanning functionalities. This project aims to provide a seamless and robust solution for various use cases
 involving barcode recognition and interactive AR experiences across both Android and iOS platforms from a single codebase.
-https://github.com/user-attachments/assets/05ea422d-8500-46c6-a942-79269955a1ea
+ 
 ## ✨ Features
+
+https://github.com/user-attachments/assets/888ce90d-522b-4a59-9f8f-ac2c262e67bb
+
+
 
 * **Cross-Platform Compatibility:** Developed with Kotlin Multiplatform Mobile, ensuring a native experience on both Android and iOS from a shared codebase.
 * **Augmented Reality (AR) Integration:** Explore interactive AR features, likely for overlaying digital information or experiences onto the real world.
