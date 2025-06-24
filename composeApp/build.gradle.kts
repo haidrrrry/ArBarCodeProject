@@ -10,6 +10,7 @@ plugins {
 }
 
 kotlin {
+
     androidTarget {
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
@@ -28,6 +29,8 @@ kotlin {
         }
     }
 
+
+
     sourceSets {
 
         androidMain.dependencies {
@@ -43,6 +46,10 @@ kotlin {
             implementation("androidx.compose.ui:ui-viewbinding:1.5.4")
 
         }
+        iosMain.dependencies {
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
+        }
+
         commonMain.dependencies {
             implementation(compose.runtime)
             implementation(compose.foundation)
@@ -59,6 +66,7 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
         }
         commonTest.dependencies {
+
             implementation(libs.kotlin.test)
         }
     }

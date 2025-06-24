@@ -19,7 +19,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ARBarcodeScreen(
@@ -147,6 +146,109 @@ fun ARBarcodeScreen(
         }
     }
 }
+
+@Composable
+fun MainAROverlayUI(
+    isScanning: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier) {
+        // Scanning crosshair
+        if (isScanning) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(200.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val strokeWidth = 4.dp.toPx()
+                    val cornerLength = 40.dp.toPx()
+                    val color = Color.Green
+
+                    // Top-left corner
+                    drawLine(
+                        color = color,
+                        start = Offset(0f, 0f),
+                        end = Offset(cornerLength, 0f),
+                        strokeWidth = strokeWidth
+                    )
+                    drawLine(
+                        color = color,
+                        start = Offset(0f, 0f),
+                        end = Offset(0f, cornerLength),
+                        strokeWidth = strokeWidth
+                    )
+
+                    // Top-right corner
+                    drawLine(
+                        color = color,
+                        start = Offset(size.width - cornerLength, 0f),
+                        end = Offset(size.width, 0f),
+                        strokeWidth = strokeWidth
+                    )
+                    drawLine(
+                        color = color,
+                        start = Offset(size.width, 0f),
+                        end = Offset(size.width, cornerLength),
+                        strokeWidth = strokeWidth
+                    )
+
+                    // Bottom-left corner
+                    drawLine(
+                        color = color,
+                        start = Offset(0f, size.height - cornerLength),
+                        end = Offset(0f, size.height),
+                        strokeWidth = strokeWidth
+                    )
+                    drawLine(
+                        color = color,
+                        start = Offset(0f, size.height),
+                        end = Offset(cornerLength, size.height),
+                        strokeWidth = strokeWidth
+                    )
+
+                    // Bottom-right corner
+                    drawLine(
+                        color = color,
+                        start = Offset(size.width, size.height - cornerLength),
+                        end = Offset(size.width, size.height),
+                        strokeWidth = strokeWidth
+                    )
+                    drawLine(
+                        color = color,
+                        start = Offset(size.width - cornerLength, size.height),
+                        end = Offset(size.width, size.height),
+                        strokeWidth = strokeWidth
+                    )
+                }
+            }
+        }
+
+        // Status indicator
+        Card(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = Color.Black.copy(alpha = 0.7f)
+            )
+        ) {
+            Text(
+                text = if (isScanning) "Scanning for barcodes..." else "AR Scanner Ready",
+                color = if (isScanning) Color.Green else Color.White,
+                modifier = Modifier.padding(12.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+
+
+
+
+
 
 @Composable
 fun AROverlayUI(

@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.StateFlow
 class ARBarcodeViewModel(private val repository: BarcodeRepository = BarcodeRepository()) {
     val scannedBarcodes: StateFlow<List<BarcodeData>> = repository.scannedBarcodes
 
-    var isScanning by mutableStateOf(false)
+    var isScanning by mutableStateOf(true)
         private set
 
     var selectedBarcode by mutableStateOf<BarcodeData?>(null)
